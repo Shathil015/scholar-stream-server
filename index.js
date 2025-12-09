@@ -28,7 +28,18 @@ async function run() {
     const scholarshipsCollections = db.collection("scholarship");
 
     //scholarship api
-    app.get("/allScholarship", async (req, res) => {});
+    app.get("/allScholarship", async (req, res) => {
+      const query = {};
+      const { email } = req.query;
+
+      if (email) {
+        query.postedUserEmail = email;
+      }
+
+      const cursor = scholarshipsCollections.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
 
     app.post("/allScholarship", async (req, res) => {
       const scholarship = req.body;
