@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const app = express();
 require("dotenv").config();
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const port = process.env.PORT || 3000;
 
 //middle wire
@@ -26,24 +26,33 @@ async function run() {
 
     const db = client.db("scholar_stream_db");
     const scholarshipsCollections = db.collection("scholarship");
+    const applicationsCollections = db.collection("applications");
 
     //scholarship api
     app.get("/allScholarship", async (req, res) => {
       const query = {};
-      const { email } = req.query;
-
-      if (email) {
-        query.postedUserEmail = email;
-      }
-
       const cursor = scholarshipsCollections.find(query);
       const result = await cursor.toArray();
+      res.send(result);
+    });
+
+    app.get("/allScholarship/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await scholarshipsCollections.findOne(query);
       res.send(result);
     });
 
     app.post("/allScholarship", async (req, res) => {
       const scholarship = req.body;
       const result = await scholarshipsCollections.insertOne(scholarship);
+      res.send(result);
+    });
+
+    //applications api
+    app.post("/applications", async (req, res) => {
+      const application = req.body;
+      const result = await applicationsCollections.insertOne(application);
       res.send(result);
     });
 
