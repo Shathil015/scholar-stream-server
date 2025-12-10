@@ -56,6 +56,26 @@ async function run() {
       res.send(result);
     });
 
+    app.get("/applications", async (req, res) => {
+      const query = {};
+
+      const { email } = req.query;
+      if (email) {
+        query.userEmail = email;
+      }
+
+      const cursor = applicationsCollections.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+
+    app.delete("/applications/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await applicationsCollections.deleteOne(query);
+      res.send(result);
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
