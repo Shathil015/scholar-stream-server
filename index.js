@@ -64,7 +64,11 @@ async function run() {
         query.userEmail = email;
       }
 
-      const cursor = applicationsCollections.find(query);
+      const options = {
+        sort: { applicationDeadline: 1 },
+      };
+
+      const cursor = applicationsCollections.find(query, options);
       const result = await cursor.toArray();
       res.send(result);
     });
