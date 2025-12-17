@@ -28,37 +28,41 @@ async function run() {
 
     const db = client.db("scholar_stream_db");
     const scholarshipsCollections = db.collection("scholarship");
-    const applicationsCollections = db.collection("applications");
+    const paymentsCollection = db.collection("payments");
+    // const applicationsCollections = db.collection("applications");
 
     //scholarship api
     app.get("/allScholarship", async (req, res) => {
-      const query = {};
-      const cursor = scholarshipsCollections.find(query);
-      const result = await cursor.toArray();
+      const search = req.query.search || "";
+
+      const subjectCategory = req.query.subjectCategory || "";
+
+      let query = {};
+
+      const { email } = req.query;
+      if (email) {
+        query.userEmail = email;
+      }
+
+      // Search functionality
+      if (search) {
+        query.$or = [
+          { scholarshipName: { $regex: search, $options: "i" } },
+          { universityName: { $regex: search, $options: "i" } },
+          { degree: { $regex: search, $options: "i" } },
+        ];
+      }
+
+      // Filter by subject category
+      if (subjectCategory) {
+        query.subjectCategory = subjectCategory;
+      }
+
+      const result = await scholarshipsCollections.find(query).toArray();
       res.send(result);
     });
 
-    app.get("/allScholarship/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await scholarshipsCollections.findOne(query);
-      res.send(result);
-    });
-
-    app.post("/allScholarship", async (req, res) => {
-      const scholarship = req.body;
-      const result = await scholarshipsCollections.insertOne(scholarship);
-      res.send(result);
-    });
-
-    //applications api
-    app.post("/applications", async (req, res) => {
-      const application = req.body;
-      const result = await applicationsCollections.insertOne(application);
-      res.send(result);
-    });
-
-    app.get("/applications", async (req, res) => {
+    app.get("/allScholarship", async (req, res) => {
       const query = {};
 
       const { email } = req.query;
@@ -70,28 +74,26 @@ async function run() {
         sort: { applicationDeadline: 1 },
       };
 
-      const cursor = applicationsCollections.find(query, options);
+      const cursor = scholarshipsCollections.find(query, options);
       const result = await cursor.toArray();
       res.send(result);
     });
 
-    app.get("/applications/:id", async (req, res) => {
+    app.get("/allScholarship/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const result = await applicationsCollections.findOne(query);
+      const result = await scholarshipsCollections.findOne(query);
       res.send(result);
     });
 
-    app.delete("/applications/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await applicationsCollections.deleteOne(query);
-      res.send(result);
-    });
     //new payment with details
-    app.post("/create-checkout-session", async (req, res) => {
+
+    app.post("/payment-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
+
       const amount = parseInt(paymentInfo.cost) * 100;
+
+      // 1. Create Stripe Session
       const session = await stripe.checkout.sessions.create({
         line_items: [
           {
@@ -106,47 +108,84 @@ async function run() {
           },
         ],
         mode: "payment",
-        customer_email: paymentInfo.senderEmail, // FIXED
-        mode: "payment",
+        customer_email: paymentInfo.senderEmail,
         metadata: {
-          parcelId: paymentInfo.parcelId, // FIXED
+          parcelId: paymentInfo.parcelId,
         },
-        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+        success_url: `${process.env.SITE_DOMAIN}/all-scholarships/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.SITE_DOMAIN}/all-scholarships/payment-cancelled`,
       });
+
+      // 2. SAVE PAYMENT AS PENDING
+      await paymentsCollection.insertOne({
+        sessionId: session.id,
+        parcelId: paymentInfo.parcelId,
+        userEmail: paymentInfo.senderEmail,
+        universityName: paymentInfo.parcelName,
+        amount: paymentInfo.cost,
+        currency: "USD",
+        status: "pending",
+        createdAt: new Date(),
+      });
+
       res.send({ url: session.url });
     });
 
-    //payment apis
+    app.patch("/payment-success", async (req, res) => {
+      const sessionId = req.query.session_id;
 
-    app.post("/create-checkout-session", async (req, res) => {
-      const paymentInfo = req.body;
-      const amount = parseInt(paymentInfo.cost) * 100;
+      if (!sessionId) {
+        return res.status(400).send({ message: "Session ID missing" });
+      }
 
-      const session = await stripe.checkout.sessions.create({
-        line_items: [
-          {
-            price_data: {
-              currency: "USD",
-              unit_amount: amount,
-              product_data: {
-                name: paymentInfo.parcelName, // FIXED
-              },
-            },
-            quantity: 1,
+      // 1. Retrieve session from Stripe
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+      if (session.payment_status !== "paid") {
+        return res.status(400).send({ message: "Payment not completed" });
+      }
+
+      // 2. Update DB
+      const result = await paymentsCollection.updateOne(
+        { sessionId },
+        {
+          $set: {
+            status: "paid",
+            paymentIntentId: session.payment_intent,
+            paidAt: new Date(),
           },
-        ],
-        customer_email: paymentInfo.senderEmail, // FIXED
-        mode: "payment",
-        metadata: {
-          parcelId: paymentInfo.parcelId, // FIXED
-        },
-        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success`,
-        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
-      });
+        }
+      );
 
-      res.send({ url: session.url });
+      res.send({ success: true });
     });
+
+    // app.post("/allScholarship", async (req, res) => {
+    //   const scholarship = req.body;
+    //   const result = await scholarshipsCollections.insertOne(scholarship);
+    //   res.send(result);
+    // });
+
+    // //applications api
+    // app.post("/applications", async (req, res) => {
+    //   const application = req.body;
+    //   const result = await applicationsCollections.insertOne(application);
+    //   res.send(result);
+    // });
+
+    // app.get("/applications/:id", async (req, res) => {
+    //   const id = req.params.id;
+    //   const query = { _id: new ObjectId(id) };
+    //   const result = await applicationsCollections.findOne(query);
+    //   res.send(result);
+    // });
+
+    // app.delete("/applications/:id", async (req, res) => {
+    //   const id = req.params.id;
+    //   const query = { _id: new ObjectId(id) };
+    //   const result = await applicationsCollections.deleteOne(query);
+    //   res.send(result);
+    // });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
