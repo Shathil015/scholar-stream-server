@@ -5,7 +5,20 @@ require("dotenv").config();
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const port = process.env.PORT || 3000;
 
+const crypto = require("crypto");
+
+function generateTransactionId() {
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const random = crypto.randomBytes(4).toString("hex").toUpperCase();
+  return `TXN-${date}-${random}`;
+}
+
 const stripe = require("stripe")(process.env.STRIP_SECRET);
+function generateTrackingId() {
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+  return `TRK-${date}-${random}`;
+}
 
 //middle wire
 app.use(express.json());
@@ -27,8 +40,12 @@ async function run() {
     await client.connect();
 
     const db = client.db("scholar_stream_db");
+    const usersCollection = db.collection("users");
     const scholarshipsCollections = db.collection("scholarship");
+    const applicationsCollection = db.collection("applications");
+    const reviewsCollection = db.collection("reviews");
     const paymentsCollection = db.collection("payments");
+
     // const applicationsCollections = db.collection("applications");
 
     //scholarship api
@@ -62,23 +79,6 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/allScholarship", async (req, res) => {
-      const query = {};
-
-      const { email } = req.query;
-      if (email) {
-        query.userEmail = email;
-      }
-
-      const options = {
-        sort: { applicationDeadline: 1 },
-      };
-
-      const cursor = scholarshipsCollections.find(query, options);
-      const result = await cursor.toArray();
-      res.send(result);
-    });
-
     app.get("/allScholarship/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
@@ -92,8 +92,9 @@ async function run() {
       const paymentInfo = req.body;
 
       const amount = parseInt(paymentInfo.cost) * 100;
+      const trackingId = generateTrackingId();
+      const transactionId = generateTransactionId();
 
-      // 1. Create Stripe Session
       const session = await stripe.checkout.sessions.create({
         line_items: [
           {
@@ -101,27 +102,30 @@ async function run() {
               currency: "USD",
               unit_amount: amount,
               product_data: {
-                name: paymentInfo.parcelName,
+                name: paymentInfo.scholarshipName,
               },
             },
             quantity: 1,
           },
         ],
         mode: "payment",
-        customer_email: paymentInfo.senderEmail,
+        customer_email: paymentInfo.userEmail,
         metadata: {
-          parcelId: paymentInfo.parcelId,
+          scholarshipId: paymentInfo.parcelId,
+          trackingId,
+          transactionId,
         },
         success_url: `${process.env.SITE_DOMAIN}/all-scholarships/payment-success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${process.env.SITE_DOMAIN}/all-scholarships/payment-cancelled`,
       });
 
-      // 2. SAVE PAYMENT AS PENDING
+      // SAVE TO paymentsCollection (NOT applications)
       await paymentsCollection.insertOne({
+        transactionId,
+        trackingId,
         sessionId: session.id,
-        parcelId: paymentInfo.parcelId,
-        userEmail: paymentInfo.senderEmail,
-        universityName: paymentInfo.parcelName,
+        scholarshipId: paymentInfo.scholarshipId,
+        userEmail: paymentInfo.userEmail,
         amount: paymentInfo.cost,
         currency: "USD",
         status: "pending",
@@ -133,21 +137,21 @@ async function run() {
 
     app.patch("/payment-success", async (req, res) => {
       const sessionId = req.query.session_id;
-
       if (!sessionId) {
         return res.status(400).send({ message: "Session ID missing" });
       }
 
-      // 1. Retrieve session from Stripe
       const session = await stripe.checkout.sessions.retrieve(sessionId);
 
       if (session.payment_status !== "paid") {
         return res.status(400).send({ message: "Payment not completed" });
       }
 
-      // 2. Update DB
-      const result = await paymentsCollection.updateOne(
-        { sessionId },
+      const { transactionId, trackingId } = session.metadata;
+
+      // Update ONLY if pending
+      await paymentsCollection.updateOne(
+        { sessionId, status: "pending" },
         {
           $set: {
             status: "paid",
@@ -157,35 +161,56 @@ async function run() {
         }
       );
 
-      res.send({ success: true });
+      res.send({
+        success: true,
+        transactionId,
+        trackingId,
+      });
     });
 
-    // app.post("/allScholarship", async (req, res) => {
-    //   const scholarship = req.body;
-    //   const result = await scholarshipsCollections.insertOne(scholarship);
-    //   res.send(result);
-    // });
+    app.get("/payment-checkout-session", async (req, res) => {
+      const query = {};
+      const { email } = req.query;
+      if (!email) {
+        return res.status(400).send({ message: "Email is required" });
+      }
+      const result = await applicationsCollection.find(query).toArray();
+      res.send(result);
+    });
 
-    // //applications api
-    // app.post("/applications", async (req, res) => {
-    //   const application = req.body;
-    //   const result = await applicationsCollections.insertOne(application);
-    //   res.send(result);
-    // });
+    app.delete("/payment-selection/:id", async (req, res) => {
+      const id = req.params.id;
 
-    // app.get("/applications/:id", async (req, res) => {
-    //   const id = req.params.id;
-    //   const query = { _id: new ObjectId(id) };
-    //   const result = await applicationsCollections.findOne(query);
-    //   res.send(result);
-    // });
+      const query = { _id: new ObjectId(id) };
 
-    // app.delete("/applications/:id", async (req, res) => {
-    //   const id = req.params.id;
-    //   const query = { _id: new ObjectId(id) };
-    //   const result = await applicationsCollections.deleteOne(query);
-    //   res.send(result);
-    // });
+      // Prevent deleting paid applications
+      const payment = await applicationsCollection.findOne(query);
+
+      if (!payment) {
+        return res.status(404).send({ message: "Selection not found" });
+      }
+
+      if (payment.status === "paid") {
+        return res
+          .status(403)
+          .send({ message: "Paid applications cannot be deleted" });
+      }
+
+      const result = await applicationsCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    app.get("/payment-info/:sessionId", async (req, res) => {
+      const payment = await paymentsCollection.findOne({
+        sessionId: req.params.sessionId,
+      });
+
+      if (!payment) {
+        return res.status(404).send({ message: "Payment not found" });
+      }
+
+      res.send(payment);
+    });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
